@@ -4,17 +4,25 @@ from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec
 import base64, os
 
+# Soporta P-256 (ES256) y P-384 (ES384) automáticamente
 app = FastAPI(title="ECDSA Signer", version="1.3.0")
 
 def load_private_key():
     pem = os.environ.get("PRIVATE_KEY_PEM")
     if not pem:
         raise RuntimeError("PRIVATE_KEY_PEM env var not set")
-    key = serialization.load_pem_private_key(pem.encode("utf-8"), password=None)
-    # Debe ser P-256 para ES256
-    if not isinstance(key.curve, ec.SECP256R1):
-        raise RuntimeError("Private key must be P-256 (secp256r1) for ES256")
-    return key
+    try:
+        return serialization.load_pem_private_key(pem.encode("utf-8"), password=None)
+    except Exception as e:
+        raise RuntimeError(f"Could not deserialize key data: {e}")
+
+def pick_alg_and_hash(key):
+    # Detecta la curva y escoge el hash correcto
+    if isinstance(key.curve, ec.SECP256R1):
+        return ("ES256", "secp256r1", hashes.SHA256())
+    if isinstance(key.curve, ec.SECP384R1):
+        return ("ES384", "secp384r1", hashes.SHA384())
+    raise RuntimeError("Unsupported EC curve; use P-256 (secp256r1) or P-384 (secp384r1)")
 
 @app.get("/")
 def root():
@@ -27,10 +35,11 @@ def pubkey_pem():
         serialization.Encoding.PEM,
         serialization.PublicFormat.SubjectPublicKeyInfo,
     )
+    # Texto plano para verlo en navegador/curl
     return Response(content=pub, media_type="text/plain; charset=us-ascii")
 
 class SignRequest(BaseModel):
-    canonical: str  # el string exacto a firmar
+    canonical: str  # string exacto a firmar, tal cual
 
 class SignResponse(BaseModel):
     alg: str
@@ -44,14 +53,14 @@ def sign(req: SignRequest):
         raise HTTPException(status_code=400, detail="canonical debe ser string no vacío")
 
     key = load_private_key()
-    data = req.canonical.encode("utf-8")
+    alg, curve_name, hash_obj = pick_alg_and_hash(key)
 
-    # ES256 = ECDSA P-256 + SHA-256
-    signature = key.sign(data, ec.ECDSA(hashes.SHA256()))
+    signed_bytes = req.canonical.encode("utf-8")
+    signature_der = key.sign(signed_bytes, ec.ECDSA(hash_obj))
 
     return {
-        "alg": "ES256",
-        "curve": "secp256r1",
-        "signature_der_base64": base64.b64encode(signature).decode(),
-        "signed_bytes_base64": base64.b64encode(data).decode(),
+        "alg": alg,
+        "curve": curve_name,
+        "signature_der_base64": base64.b64encode(signature_der).decode(),
+        "signed_bytes_base64": base64.b64encode(signed_bytes).decode(),
     }
