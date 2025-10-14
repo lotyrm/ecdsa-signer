@@ -22,7 +22,8 @@ def _detect_params(key) -> tuple[str, str, hashes.HashAlgorithm, int]:
     if isinstance(key.curve, ec.SECP256R1):
         return "ES256", "secp256r1", hashes.SHA256(), 32
     if isinstance(key.curve, ec.SECP384R1):
-        return "ES384", "secp384r1", hashes.SHA384(), 48
+        # Círculo firma P-384 con SHA-256 ("SHA256withECDSA")
+        return "ES384", "secp384r1", hashes.SHA256(), 48
     raise RuntimeError("Unsupported curve")
 
 @app.get("/")
@@ -181,11 +182,12 @@ def sign_digest(req: SignDigestRequest):
 
     key = load_private_key()
     alg, curve_name, hash_alg, rs_len = _detect_params(key)
-    expected_len = 32 if alg == "ES256" else 48
-    if len(digest) != expected_len:
+    # Si hash es SHA-256 esperamos 32 bytes de digest; si SHA-384, 48 bytes
+    expected_digest_len = 32 if isinstance(hash_alg, hashes.SHA256) else 48
+    if len(digest) != expected_digest_len:
         raise HTTPException(
             status_code=400,
-            detail=f"digest debe tener {expected_len} bytes para {alg}",
+            detail=f"digest debe tener {expected_digest_len} bytes para {alg}",
         )
 
     # Sign prehashed digest explicitly using Prehashed de hash_alg correspondiente
