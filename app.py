@@ -3,6 +3,8 @@ from pydantic import BaseModel
 from cryptography.hazmat.primitives import hashes, serialization
 from cryptography.hazmat.primitives.asymmetric import ec, utils
 import base64, os
+import json, math
+from typing import Any
 
 app = FastAPI(title="ECDSA Signer", version="1.4.0")
 
@@ -75,6 +77,55 @@ def sign(req: SignRequest):
         "signature_der_base64": base64.b64encode(signature).decode(),
         "signed_bytes_base64": base64.b64encode(data).decode(),
     }
+
+
+# --- Canonical JSON helpers & endpoints ---
+
+class CanonicalizeRequest(BaseModel):
+    # JSON arbitrario que será canonizado
+    json: Any
+
+
+class CanonicalizeResponse(BaseModel):
+    canonical: str
+
+
+def _normalize_numbers(value: Any) -> Any:
+    """
+    Normaliza números para la canónica:
+    - Convierte floats equivalentes a enteros (p.ej. 1.0) en int → 1
+    - Mantiene ints y otros tipos sin cambios
+    - Recorre recursivamente listas y diccionarios
+
+    Nota: Esto no implementa JCS completo para todos los casos numéricos,
+    pero evita representaciones como 1.0 cuando el valor es entero.
+    """
+    if isinstance(value, float):
+        if math.isfinite(value) and value.is_integer():
+            return int(value)
+        return value
+    if isinstance(value, dict):
+        return {k: _normalize_numbers(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_normalize_numbers(v) for v in value]
+    return value
+
+
+def canonicalize_json(value: Any) -> str:
+    """Devuelve el JSON canónico: llaves ordenadas, sin espacios innecesarios."""
+    normalized = _normalize_numbers(value)
+    try:
+        # ensure_ascii=False para preservar Unicode; separadores compactos; llaves ordenadas
+        return json.dumps(normalized, ensure_ascii=False, separators=(",", ":"), sort_keys=True)
+    except TypeError as e:
+        # Tipos no serializables (e.g. bytes) no son válidos para JSON
+        raise HTTPException(status_code=400, detail=f"JSON no serializable: {str(e)}")
+
+
+@app.post("/canonicalize", response_model=CanonicalizeResponse)
+def canonicalize(req: CanonicalizeRequest):
+    canonical = canonicalize_json(req.json)
+    return {"canonical": canonical}
 
 def _der_to_rs(der_signature: bytes) -> tuple[bytes, bytes]:
     # Parse SEQUENCE of two INTEGERs (r, s) from ASN.1 DER
@@ -157,4 +208,38 @@ def sign_digest(req: SignDigestRequest):
         "signature_der_base64": base64.b64encode(signature_der).decode(),
         "signature_p1363_base64": base64.b64encode(rs).decode(),
         "signature_p1363_base64url": base64.urlsafe_b64encode(rs).rstrip(b"=").decode(),
+    }
+
+
+class SignJsonRequest(BaseModel):
+    json: Any
+
+
+class SignJsonResponse(BaseModel):
+    alg: str
+    curve: str
+    canonical: str
+    signature_der_base64: str
+    signature_p1363_base64: str
+    signature_p1363_base64url: str
+    signed_bytes_base64: str
+
+
+@app.post("/sign/json", response_model=SignJsonResponse)
+def sign_json(req: SignJsonRequest):
+    canonical = canonicalize_json(req.json)
+    key = load_private_key()
+    data = canonical.encode("utf-8")
+    signature_der = key.sign(data, ec.ECDSA(hashes.SHA256()))
+    r, s = _der_to_rs(signature_der)
+    rs = r + s
+
+    return {
+        "alg": "ES256",
+        "curve": "secp256r1",
+        "canonical": canonical,
+        "signature_der_base64": base64.b64encode(signature_der).decode(),
+        "signature_p1363_base64": base64.b64encode(rs).decode(),
+        "signature_p1363_base64url": base64.urlsafe_b64encode(rs).rstrip(b"=").decode(),
+        "signed_bytes_base64": base64.b64encode(data).decode(),
     }
