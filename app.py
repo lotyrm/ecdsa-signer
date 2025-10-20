@@ -127,6 +127,18 @@ def canonicalize(req: CanonicalizeRequest):
     canonical = canonicalize_json(req.json)
     return {"canonical": canonical}
 
+
+if __name__ == "__main__":
+    # Permite ejecutar: python app.py
+    # Respeta PORT si está definido (Heroku/Render/Cloud Run style)
+    import uvicorn
+    port_str = os.environ.get("PORT", "8000")
+    try:
+        port = int(port_str)
+    except ValueError:
+        port = 8000
+    uvicorn.run("app:app", host="0.0.0.0", port=port, reload=False)
+
 def _der_to_rs(der_signature: bytes) -> tuple[bytes, bytes]:
     # Parse SEQUENCE of two INTEGERs (r, s) from ASN.1 DER
     i = 0
