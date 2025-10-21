@@ -11,10 +11,19 @@ def load_private_key():
     if not pem:
         raise RuntimeError("PRIVATE_KEY_PEM env var not set")
     key = serialization.load_pem_private_key(pem.encode("utf-8"), password=None)
-    # Debe ser P-256 para ES256
-    if not isinstance(key.curve, ec.SECP256R1):
-        raise RuntimeError("Private key must be P-256 (secp256r1) for ES256")
+    # Soporta P-384 (secp384r1) para Círculo de Crédito
+    if not isinstance(key.curve, (ec.SECP256R1, ec.SECP384R1)):
+        raise RuntimeError("Private key must be P-256 (secp256r1) or P-384 (secp384r1)")
     return key
+
+def get_curve_info(key):
+    """Retorna información sobre la curva de la llave"""
+    if isinstance(key.curve, ec.SECP256R1):
+        return {"alg": "ES256", "curve": "secp256r1", "size": 32}
+    elif isinstance(key.curve, ec.SECP384R1):
+        return {"alg": "ES384", "curve": "secp384r1", "size": 48}
+    else:
+        raise RuntimeError("Unsupported curve")
 
 @app.get("/")
 def root():
@@ -64,20 +73,26 @@ def sign(req: SignRequest):
         raise HTTPException(status_code=400, detail="canonical debe ser string no vacío")
 
     key = load_private_key()
+    curve_info = get_curve_info(key)
     data = req.canonical.encode("utf-8")
 
-    # ES256 = ECDSA P-256 + SHA-256
+    # SHA-256 para ambas curvas (como requiere Círculo)
     signature = key.sign(data, ec.ECDSA(hashes.SHA256()))
 
     return {
-        "alg": "ES256",
-        "curve": "secp256r1",
+        "alg": curve_info["alg"],
+        "curve": curve_info["curve"],
         "signature_der_base64": base64.b64encode(signature).decode(),
         "signed_bytes_base64": base64.b64encode(data).decode(),
     }
 
-def _der_to_rs(der_signature: bytes) -> tuple[bytes, bytes]:
-    # Parse SEQUENCE of two INTEGERs (r, s) from ASN.1 DER
+def _der_to_rs(der_signature: bytes, size: int = 32) -> tuple[bytes, bytes]:
+    """Parse SEQUENCE of two INTEGERs (r, s) from ASN.1 DER
+    
+    Args:
+        der_signature: DER encoded signature
+        size: Size in bytes for the curve (32 for P-256, 48 for P-384)
+    """
     i = 0
     if i >= len(der_signature) or der_signature[i] != 0x30:
         raise ValueError("Not a DER SEQUENCE")
@@ -107,9 +122,9 @@ def _der_to_rs(der_signature: bytes) -> tuple[bytes, bytes]:
     slen = der_signature[i]; i += 1
     s = der_signature[i:i+slen]; i += slen
 
-    # Left-strip zeros then pad to 32 bytes for P-256
-    r = r.lstrip(b"\x00").rjust(32, b"\x00")
-    s = s.lstrip(b"\x00").rjust(32, b"\x00")
+    # Left-strip zeros then pad to correct size
+    r = r.lstrip(b"\x00").rjust(size, b"\x00")
+    s = s.lstrip(b"\x00").rjust(size, b"\x00")
     return r, s
 
 @app.post("/sign/formats", response_model=SignFormatsResponse)
@@ -118,15 +133,16 @@ def sign_formats(req: SignRequest):
         raise HTTPException(status_code=400, detail="canonical debe ser string no vacío")
 
     key = load_private_key()
+    curve_info = get_curve_info(key)
     data = req.canonical.encode("utf-8")
     signature_der = key.sign(data, ec.ECDSA(hashes.SHA256()))
 
-    r, s = _der_to_rs(signature_der)
+    r, s = _der_to_rs(signature_der, curve_info["size"])
     rs = r + s
 
     return {
-        "alg": "ES256",
-        "curve": "secp256r1",
+        "alg": curve_info["alg"],
+        "curve": curve_info["curve"],
         "signature_der_base64": base64.b64encode(signature_der).decode(),
         "signature_p1363_base64": base64.b64encode(rs).decode(),
         "signature_p1363_base64url": base64.urlsafe_b64encode(rs).rstrip(b"=").decode(),
@@ -145,16 +161,22 @@ def sign_digest(req: SignDigestRequest):
         raise HTTPException(status_code=400, detail="sha256_base64 debe decodificar a 32 bytes")
 
     key = load_private_key()
+    curve_info = get_curve_info(key)
     # Sign prehashed digest explicitly using Prehashed
     signature_der = key.sign(digest, ec.ECDSA(utils.Prehashed(hashes.SHA256())))
-    r, s = _der_to_rs(signature_der)
+    r, s = _der_to_rs(signature_der, curve_info["size"])
     rs = r + s
 
     return {
-        "alg": "ES256",
-        "curve": "secp256r1",
+        "alg": curve_info["alg"],
+        "curve": curve_info["curve"],
         "digest_base64": base64.b64encode(digest).decode(),
         "signature_der_base64": base64.b64encode(signature_der).decode(),
         "signature_p1363_base64": base64.b64encode(rs).decode(),
         "signature_p1363_base64url": base64.urlsafe_b64encode(rs).rstrip(b"=").decode(),
     }
+
+if __name__ == "__main__":
+    import uvicorn
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
