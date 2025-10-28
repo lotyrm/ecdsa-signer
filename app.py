@@ -122,9 +122,17 @@ def _der_to_rs(der_signature: bytes, size: int = 32) -> tuple[bytes, bytes]:
     slen = der_signature[i]; i += 1
     s = der_signature[i:i+slen]; i += slen
 
-    # Left-strip zeros then pad to correct size
-    r = r.lstrip(b"\x00").rjust(size, b"\x00")
-    s = s.lstrip(b"\x00").rjust(size, b"\x00")
+    # Remove leading zeros ONLY if they're not needed for sign extension
+    # For positive integers, remove leading 0x00 if present
+    if len(r) > 0 and r[0] == 0x00 and (len(r) == 1 or r[1] & 0x80 == 0):
+        r = r[1:]
+    if len(s) > 0 and s[0] == 0x00 and (len(s) == 1 or s[1] & 0x80 == 0):
+        s = s[1:]
+    
+    # Pad to size with zeros on the LEFT (big-endian)
+    r = r.rjust(size, b"\x00")[:size]
+    s = s.rjust(size, b"\x00")[:size]
+    
     return r, s
 
 @app.post("/sign/formats", response_model=SignFormatsResponse)
